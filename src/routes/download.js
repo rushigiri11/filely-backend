@@ -5,13 +5,13 @@ const router = express.Router();
 
 /**
  * GET /api/download/:code
- * Returns a signed download URL
+ * Unlimited access until expiry
  */
 router.get("/:code", async (req, res) => {
   try {
     const { code } = req.params;
 
-    // 1️⃣ Fetch file metadata by code
+    // 1️⃣ Fetch file
     const { data: file, error } = await supabase
       .from("files")
       .select("*")
@@ -21,11 +21,11 @@ router.get("/:code", async (req, res) => {
     if (error || !file) {
       return res.status(404).json({
         success: false,
-        error: "Invalid or expired code"
+        error: "Invalid or expired link"
       });
     }
 
-    // 2️⃣ Check expiry
+    // 2️⃣ Expiry check ONLY
     if (new Date(file.expires_at) < new Date()) {
       return res.status(410).json({
         success: false,
@@ -33,42 +33,34 @@ router.get("/:code", async (req, res) => {
       });
     }
 
-    // 3️⃣ Check download limit
-    if (file.download_count >= file.max_downloads) {
-      return res.status(403).json({
-        success: false,
-        error: "Download limit reached"
-      });
-    }
-
-    // 4️⃣ Generate signed URL (valid for 1 minute)
-    const { data: signedUrl, error: urlError } =
+    // 3️⃣ Generate signed URL (60 seconds)
+    const { data: signed, error: urlError } =
       await supabase.storage
         .from("files")
         .createSignedUrl(file.storage_path, 60);
 
-    if (urlError) {
-      throw urlError;
-    }
+    if (urlError) throw urlError;
 
-    // 5️⃣ Increment download count
+    // 4️⃣ Increment count (analytics only)
     await supabase
       .from("files")
-      .update({ download_count: file.download_count + 1 })
+      .update({
+        download_count: file.download_count + 1
+      })
       .eq("id", file.id);
 
-    // 6️⃣ Send download URL
+    // 5️⃣ Respond
     res.json({
       success: true,
       fileName: file.original_name,
-      downloadUrl: signedUrl.signedUrl
+      downloadUrl: signed.signedUrl
     });
 
   } catch (err) {
     console.error("Download error:", err);
     res.status(500).json({
       success: false,
-      error: err.message
+      error: "Internal server error"
     });
   }
 });

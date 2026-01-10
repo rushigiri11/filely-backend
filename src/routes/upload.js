@@ -95,7 +95,6 @@ router.post("/", upload.single("file"), async (req, res) => {
       file_size: file.size,
       storage_path: storagePath,
       expires_at: expiresAt,
-      max_downloads: 1,
       download_count: 0
     });
 
