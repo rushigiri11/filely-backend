@@ -57,9 +57,8 @@ router.post("/", upload.single("file"), async (req, res) => {
 
     const file = req.file;
 
-    // 2️⃣ Validate expiry (from frontend)
+    // 2️⃣ Validate expiry
     const expiryMinutes = Number(req.body.expiryMinutes);
-
     if (!ALLOWED_EXPIRY_MINUTES.includes(expiryMinutes)) {
       return res.status(400).json({
         success: false,
@@ -67,27 +66,24 @@ router.post("/", upload.single("file"), async (req, res) => {
       });
     }
 
-    // 3️⃣ Generate expiry timestamp
+    // 3️⃣ Expiry timestamp
     const expiresAt = new Date(Date.now() + expiryMinutes * 60 * 1000);
 
-    // 4️⃣ Generate unique numeric code
+    // 4️⃣ Generate code + storage path
     const code = await generateUniqueNumericCode();
     const fileId = uuidv4();
-
     const storagePath = `${fileId}/${file.originalname}`;
 
-    // 5️⃣ Upload file to Supabase Storage
+    // 5️⃣ Upload to Supabase Storage
     const { error: uploadError } = await supabase.storage
       .from("files")
       .upload(storagePath, file.buffer, {
         contentType: file.mimetype
       });
 
-    if (uploadError) {
-      throw uploadError;
-    }
+    if (uploadError) throw uploadError;
 
-    // 6️⃣ Save metadata in database
+    // 6️⃣ Save metadata
     const { error: dbError } = await supabase.from("files").insert({
       code,
       original_name: file.originalname,
@@ -98,11 +94,12 @@ router.post("/", upload.single("file"), async (req, res) => {
       download_count: 0
     });
 
-    if (dbError) {
-      throw dbError;
-    }
+    if (dbError) throw dbError;
 
-    // 7️⃣ Response
+    // 7️⃣ Increment global upload counter
+    await supabase.rpc("increment_total_uploads");
+
+    // 8️⃣ Response
     res.json({
       success: true,
       code,
@@ -111,10 +108,35 @@ router.post("/", upload.single("file"), async (req, res) => {
 
   } catch (err) {
     console.error("Upload error:", err);
-
     res.status(500).json({
       success: false,
       error: "Internal server error"
+    });
+  }
+});
+
+/**
+ * GET /api/upload/stats
+ * Returns total files uploaded on platform
+ */
+router.get("/stats", async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("stats")
+      .select("total_uploads")
+      .single();
+
+    if (error) throw error;
+
+    res.json({
+      success: true,
+      totalUploads: data.total_uploads
+    });
+  } catch (err) {
+    console.error("Stats error:", err);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch stats"
     });
   }
 });
