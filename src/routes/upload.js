@@ -34,7 +34,7 @@ async function generateUniqueNumericCode() {
       .from("files")
       .select("id")
       .eq("code", code)
-      .single();
+      .maybeSingle(); // safer than single()
 
     exists = !!data;
   }
@@ -83,7 +83,7 @@ router.post("/", upload.single("file"), async (req, res) => {
 
     if (uploadError) throw uploadError;
 
-    // 6️⃣ Save metadata
+    // 6️⃣ Save metadata in DB
     const { error: dbError } = await supabase.from("files").insert({
       code,
       original_name: file.originalname,
@@ -96,8 +96,12 @@ router.post("/", upload.single("file"), async (req, res) => {
 
     if (dbError) throw dbError;
 
-    // 7️⃣ Increment global upload counter
-    await supabase.rpc("increment_total_uploads");
+    // 7️⃣ Increment global upload counter (SAFE)
+    const { error: rpcError } = await supabase.rpc("increment_total_uploads");
+
+    if (rpcError) {
+      console.error("RPC error:", rpcError);
+    }
 
     // 8️⃣ Response
     res.json({
@@ -108,6 +112,7 @@ router.post("/", upload.single("file"), async (req, res) => {
 
   } catch (err) {
     console.error("Upload error:", err);
+
     res.status(500).json({
       success: false,
       error: "Internal server error"
@@ -124,16 +129,19 @@ router.get("/stats", async (req, res) => {
     const { data, error } = await supabase
       .from("stats")
       .select("total_uploads")
-      .single();
+      .limit(1)
+      .maybeSingle(); // avoids crash if multiple rows
 
     if (error) throw error;
 
     res.json({
       success: true,
-      totalUploads: data.total_uploads
+      totalUploads: data?.total_uploads || 0
     });
+
   } catch (err) {
     console.error("Stats error:", err);
+
     res.status(500).json({
       success: false,
       error: "Failed to fetch stats"
