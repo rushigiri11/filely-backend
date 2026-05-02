@@ -15,6 +15,8 @@ const upload = multer({
   }
 });
 
+const MAX_FILES = 15;
+
 /**
  * Allowed expiry times (minutes)
  */
@@ -45,19 +47,35 @@ async function generateUniqueNumericCode() {
 /**
  * POST /api/upload
  */
-router.post("/", upload.single("file"), async (req, res) => {
+router.post(
+  "/",
+  upload.fields([
+    { name: "files", maxCount: MAX_FILES },
+    { name: "file", maxCount: 1 }
+  ]),
+  async (req, res) => {
   try {
-    // 1️⃣ Validate file
-    if (!req.file) {
+    const uploadedFiles = [
+      ...(req.files?.files || []),
+      ...(req.files?.file || [])
+    ];
+
+    // 1. Validate files
+    if (!uploadedFiles.length) {
       return res.status(400).json({
         success: false,
-        error: "No file uploaded"
+        error: "No files uploaded"
       });
     }
 
-    const file = req.file;
+    if (uploadedFiles.length > MAX_FILES) {
+      return res.status(400).json({
+        success: false,
+        error: `You can upload up to ${MAX_FILES} files at once`
+      });
+    }
 
-    // 2️⃣ Validate expiry
+    // 2. Validate expiry
     const expiryMinutes = Number(req.body.expiryMinutes);
     if (!ALLOWED_EXPIRY_MINUTES.includes(expiryMinutes)) {
       return res.status(400).json({
@@ -66,56 +84,103 @@ router.post("/", upload.single("file"), async (req, res) => {
       });
     }
 
-    // 3️⃣ Expiry timestamp
+    // 3. Expiry timestamp
     const expiresAt = new Date(Date.now() + expiryMinutes * 60 * 1000);
 
-    // 4️⃣ Generate code + storage path
+    // 4. Generate one shared code for the whole upload batch
     const code = await generateUniqueNumericCode();
-    const fileId = uuidv4();
-    const storagePath = `${fileId}/${file.originalname}`;
 
-    // 5️⃣ Upload to Supabase Storage
-    const { error: uploadError } = await supabase.storage
-      .from("files")
-      .upload(storagePath, file.buffer, {
-        contentType: file.mimetype
+    const uploadedStoragePaths = [];
+    const records = [];
+
+    // 5. Upload all files to Supabase Storage
+    for (const file of uploadedFiles) {
+      const fileId = uuidv4();
+      const storagePath = `${code}/${fileId}/${file.originalname}`;
+
+      const { error: uploadError } = await supabase.storage
+        .from("files")
+        .upload(storagePath, file.buffer, {
+          contentType: file.mimetype
+        });
+
+      if (uploadError) {
+        throw uploadError;
+      }
+
+      uploadedStoragePaths.push(storagePath);
+      records.push({
+        code,
+        original_name: file.originalname,
+        mime_type: file.mimetype,
+        file_size: file.size,
+        storage_path: storagePath,
+        expires_at: expiresAt,
+        download_count: 0
       });
-
-    if (uploadError) throw uploadError;
-
-    // 6️⃣ Save metadata in DB
-    const { error: dbError } = await supabase.from("files").insert({
-      code,
-      original_name: file.originalname,
-      mime_type: file.mimetype,
-      file_size: file.size,
-      storage_path: storagePath,
-      expires_at: expiresAt,
-      download_count: 0
-    });
-
-    if (dbError) throw dbError;
-
-    // 7️⃣ Increment global upload counter (SAFE)
-    const { error: rpcError } = await supabase.rpc("increment_total_uploads");
-
-    if (rpcError) {
-      console.error("RPC error:", rpcError);
     }
 
-    // 8️⃣ Response
+    // 6. Save metadata in DB
+    const { error: dbError } = await supabase.from("files").insert(records);
+
+    if (dbError) {
+      await Promise.all(
+        uploadedStoragePaths.map((storagePath) =>
+          supabase.storage.from("files").remove([storagePath])
+        )
+      );
+
+      throw dbError;
+    }
+
+    // 7. Increment global upload counter once per file
+    const rpcCalls = Array.from({ length: uploadedFiles.length }, () =>
+      supabase.rpc("increment_total_uploads")
+    );
+
+    const rpcResults = await Promise.all(rpcCalls);
+    const hasRpcError = rpcResults.some(({ error }) => error);
+
+    if (hasRpcError) {
+      console.error(
+        "RPC error:",
+        rpcResults.find(({ error }) => error)?.error
+      );
+    }
+
+    // 8. Response
     res.json({
       success: true,
       code,
-      expiresIn: `${expiryMinutes} minutes`
+      expiresIn: `${expiryMinutes} minutes`,
+      fileCount: uploadedFiles.length,
+      files: uploadedFiles.map((file) => ({
+        fileName: file.originalname,
+        fileSize: file.size
+      }))
     });
-
   } catch (err) {
     console.error("Upload error:", err);
 
+    const isDuplicateCodeError =
+      err?.code === "23505" &&
+      typeof err?.message === "string" &&
+      err.message.toLowerCase().includes("code");
+
+    if (isDuplicateCodeError) {
+      return res.status(500).json({
+        success: false,
+        error:
+          "Database schema still has a unique constraint on files.code. Remove that unique constraint to allow multi-file uploads with one shared code."
+      });
+    }
+
     res.status(500).json({
       success: false,
-      error: "Internal server error"
+      error:
+        process.env.NODE_ENV === "production"
+          ? "Internal server error"
+          : err?.message || "Internal server error"
     });
   }
 });
