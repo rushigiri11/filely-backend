@@ -133,19 +133,18 @@ router.post(
       throw dbError;
     }
 
-    // 7. Increment global upload counter once per file
-    const rpcCalls = Array.from({ length: uploadedFiles.length }, () =>
-      supabase.rpc("increment_total_uploads")
+    // 7. Increment the global upload counter atomically (single row, +N).
+    let totalUploads = null;
+    const { data: rpcTotal, error: rpcError } = await supabase.rpc(
+      "increment_total_uploads",
+      { n: uploadedFiles.length }
     );
 
-    const rpcResults = await Promise.all(rpcCalls);
-    const hasRpcError = rpcResults.some(({ error }) => error);
-
-    if (hasRpcError) {
-      console.error(
-        "RPC error:",
-        rpcResults.find(({ error }) => error)?.error
-      );
+    if (rpcError) {
+      // Non-critical: the upload already succeeded. Log and move on.
+      console.error("Stats RPC error:", rpcError);
+    } else if (typeof rpcTotal === "number") {
+      totalUploads = rpcTotal;
     }
 
     // 8. Response
@@ -154,6 +153,7 @@ router.post(
       code,
       expiresIn: `${expiryMinutes} minutes`,
       fileCount: uploadedFiles.length,
+      totalUploads,
       files: uploadedFiles.map((file) => ({
         fileName: file.originalname,
         fileSize: file.size
